@@ -1,0 +1,290 @@
+---
+title: "Peak integration script"
+author: "Jakob Koch"
+date: "18/02/2020"
+output: html_notebook
+---
+
+**history of the versions...**
+Fri Nov 22 14:12:30 2019
+Tue Feb 18 11:02:09 2020 
+Tue Mar 24 12:48:23 2020 
+Mon Apr 06 11:28:46 2020 last
+
+# Setup
+```{r setup}
+# knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(mzR,here,tidyverse,furrr,writexl,readxl)
+here()
+# library(minpack.lm)
+# library(tidyverse)
+# setwd("~/Version_control_test/phospholipid_ms2_classifier/Project_fromHD/MAK_Peakextractor")
+source(file = here("Functions","Functions_1_peak_integration_automated_Dilutions.R"))
+# readxl,pheatmap,writexl
+```
+
+## Load data
+the mzML files are defined as by their ending and an additional user defined filter.
+one should here select only one kind of file, either *Sample* or *Dilution* alike types
+
+
+*Bitte filtere von der Excelpeaklist nur entweder 
+die Dilutions (defined peaklist) raus (für diese werden die ersten beiden eXcel Tabellenblätter verwendet,
+oder alle Samples (large peaklist), raus und rechne das entsprechend....
+ich sollte da längst eine Anleitung geschrieben haben....*
+
+* different peaklists can be combined
+* different algorithms shouldn't be combined/used for one batch of data.
+
+
+```{r Load Data1}
+      # directory <- "O:/LCMS/PLAN/2019/20190808_PLAN032_HAP1pos_Naschberger_Ruediger_GPX4_oxPL/Alexander_HEK_HSD10/HEK_HSD10_CL/Raw Data"
+      # directory <- "Z:/LCMS/PLAN/2019/20190930PLAN033_AHuber_EWerner_GPX4/E_Werner_mouse_tissues"
+      # directory new folder layout usage automated mzML data finding enabled:
+
+# Readout raw data file information ---------------------------------------
+
+Project_mzML.files <- readxl::read_xlsx(path = here(paste0("Proj_mzMLs.xlsx")))
+View(Project_mzML.files)
+Project_mzML.files <- Project_mzML.files %>% filter(str_detect(string = Filename,pattern = "DIV"))
+Project_mzML.files <- Project_mzML.files %>% filter(str_detect(string = Filename,pattern = ".*ution"))
+# 
+# Project_mzML.files <- Project_mzML.files %>% filter(!str_detect(string = Filename,pattern = ".*ution"))
+# Project_mzML.files <- Project_mzML.files %>% filter(!str_detect(string = Filename,pattern = ".*QC"))
+
+filelist <- Project_mzML.files$Filepath
+filelist
+
+filelist2 <- (str_extract(string = filelist,pattern = "[^/]+$") %>% str_split(pattern = "\\.",simplify = T))[,1]
+filelist2
+```
+
+## Important!
+The pattern here has to match either 
+
+* Samples or
+* Dilutions
+for script to work propperly!
+
+```{r Selection of Folders,eval=FALSE}
+folder <- "1_Dilutions_peakf2_"
+folder <- "2_Samples_peakf3_"
+folder <- "2_QCs"
+
+```
+
+## Load Peaklists
+In a second step the rtstdlist, a list containing Std peaks for RT correction is loaded. (Manual input is still present, but unused)
+Here the peaklists are loaded in a list format, one list entry per XLSX page.
+Comments are saved to an additional vector *comments* for later use in the single lipid plots.
+```{r Load Data2}
+peaklist_file <- choose.files(default = here("2_PL_peaklist.xlsx"),multi = F,index = 1,filters = matrix(c("xlsx","*.xlsx","csv","*.csv"),ncol=2,byrow = T))
+peaklists <- list()
+for (i in seq_along(excel_sheets(peaklist_file))) {
+  peaklists[[i]] <- read_xlsx(path = peaklist_file,sheet = i) 
+}
+names(peaklists) <- excel_sheets(peaklist_file)
+
+names(peaklists)
+
+
+if(str_detect(string = folder,pattern = "Samples")) {
+  # samples:
+  lipidlist <- peaklists$PLOP1 %>% select(1:3)
+  comments <- peaklists$PLOP1 %>% select(lipid,4:ncol(.))
+  rtstdlist <- peaklists$PLOP2 %>% select(1:3)
+} else {
+  # dilutions
+  lipidlist <- peaklists$Dilutions %>% select(1:3)
+  rtstdlist <- peaklists$Rtstdlist_Dilutions %>% select(1:3)
+  comments <- peaklists$Dilutions %>% select(lipid,4:ncol(.))
+}
+
+# check for duplicate lipid id
+lipidlist %>% group_by(lipid) %>% summarise(N=n()) %>% filter(N>1)
+```
+
+# LOOP for automated Readout
+Can easily be run as a independent R background job, works great, just mark from line 132 onwards.
+```{r -# Initialize result object}
+dir.create(path = here(paste0(folder,Sys.Date())))
+Folder_created <- paste0(folder,Sys.Date())
+# Folder_created <- paste0(folder,"2019-12-11")
+progress_bar <- progress_estimated(n = length(filelist))
+ # i=1
+
+# For loop, does everything updated-------------------------------------------
+# Fri Sep 06 14:00:46 2019 ------------------------------
+
+pacman::p_load(mzR,here,tidyverse,furrr,writexl,readxl)
+source(file = here("Functions","Functions_1_peak_integration_automated_Dilutions.R"))
+# for(i in 12){
+rtstdlist1 <- rtstdlist
+  i=1  
+  print(paste("estimated runtime ~", length(filelist)*5, "min"))
+for(i in seq_along(filelist)){
+  # Dilutions_Integration <- function(filelist,filelist2,rtstdlist,lipidlist) {}
+  print(paste(i, "of", length(filelist)))
+  file_name <- filelist2[i]
+  print(file_name)
+  mz <- openMSfile(filelist[i])
+  
+  ms1_header <- header(mz) %>% filter(msLevel==1)
+  ms2_header <- header(mz) %>% filter(msLevel==2)
+  rtstdlist1 -> rtstdlist
+  # extracts calibration data
+  cal1 <- apply(X = rtstdlist1, MARGIN = 1, 
+                FUN = function(x) calibrate(x=x, 
+                                            mz=mz, 
+                                            ms1_header=ms1_header))
+  # filter for max peak time!
+  # here one needs to summarize, in the rare event of two MS1 signals at the peak maximum...
+  extracted_cal_info <- bind_rows(
+    map(cal1,.f = function(x){
+      x %>% filter(Peak_max==T) %>%summarise(rt_times=mean(rt_times),m_z=mean(m_z),Intensity=mean(Intensity)) %>% select(rt_times,m_z,Intensity)
+    })
+  )
+  rtstdlist <- bind_cols(rtstdlist1,extracted_cal_info) %>% rename(found="rt_times",mz_found="m_z") %>% filter(Intensity >=max(Intensity)*0.1)# %>% select(-Intensity)
+  
+  cal_model <- lm(y~x,data = data.frame(x=rtstdlist$rt, y=rtstdlist$found),weights = rtstdlist$Intensity)
+  rtstdlist$rt_corr  <- predict(cal_model, newdata=data.frame(x=rtstdlist$rt))
+  lipidlist$rt_corr <- predict(cal_model, newdata=data.frame(x=lipidlist$rt))
+  rtstdlist$Sample <- file_name
+
+  # use this line to export the found and corrected cal. information -> future save rtstdlist & lipidlist into Rdata
+  # writexl::write_xlsx(x = rtstdlist,path = here(paste("New_automatically_extracted_Std_list_",Sys.Date(),".xlsx")))
+  # write.csv(x = rtstdlist %>% select(mz_found,found,lipid),file = here(paste("New_automatically_extracted_Std_list_",Sys.Date(),".csv")),row.names = F)
+  p_cal <- ggplot(data =  bind_rows(cal1),mapping = aes(x = rt_times,y = Intensity))+
+    geom_line()+
+    scale_alpha_continuous(range = c(0,1))+
+    geom_vline(data = rtstdlist,mapping = aes(xintercept = rt,colour="Searched_at"),linetype=5)+
+    geom_vline(data = rtstdlist,mapping = aes(xintercept = found,colour="Found_at"),linetype=5)+
+    geom_vline(data = rtstdlist,mapping = aes(xintercept = rt_corr,colour="Corrected"),linetype=5)+
+    scale_color_manual(name="Lines",values = c("Searched_at"="red","Found_at"="blue","Corrected"="green"))+
+    facet_wrap(~lipid,scales = "free")+
+    labs(title = file_name)+
+    theme_light()+
+    theme(plot.title = element_text(hjust = 0.5))
+  ggsave(filename = here(Folder_created,paste0(file_name,"_cal_",Sys.Date(),".pdf")),plot = p_cal,device = "pdf",width = 11.7,height = 8.3)
+  
+  
+  # old apply approach working...
+   tictoc::tic()
+   peak_res <- apply(X = lipidlist, MARGIN = 1,
+                     FUN = function(x) peakextrakt2(rt=as.numeric(x[4]),
+                                                   mass=as.numeric(x[3]),
+                                                   mz=mz,
+                                                   ms1_header=ms1_header
+                                                   ,ms2_header=ms2_header
+                                                   ))
+   tictoc::toc()
+   
+   
+   Peaklist <- bind_cols(lipidlist %>% rename_at(.vars = c(2:4),.funs = function(x) paste0("A_",x)),
+                         bind_rows(peak_res))  %>% mutate(Sample=filelist2[i]) %>% select(Sample,everything())
+   tictoc::toc()
+
+  
+   window <- c(500,1000) #lower and upper cut off
+  
+   rt_min <-  ms1_header[which.min(abs(ms1_header$retentionTime - 0*60)), 1]
+   rt_max <-  ms1_header[which.min(abs(ms1_header$retentionTime - 12*60+12)), 1]
+
+# CL_Version 0.1 JK   
+#  window <- c(1000,1650) #lower and upper cut off 
+#  rt_min <-  ms1_header[which.min(abs(ms1_header$retentionTime - 6*60)), 1]
+#  rt_max <-  ms1_header[which.min(abs(ms1_header$retentionTime - 22*60)), 1]
+  
+   rt_spectra <- ms1_header$seqNum[ms1_header$seqNum >= rt_min & ms1_header$seqNum <= rt_max]
+   rt_times <- ms1_header$retentionTime[ms1_header$seqNum >= rt_min & ms1_header$seqNum <= rt_max]
+  
+   # Data extraction for the 2D plots
+   spectra <- peaks(mz, rt_spectra)
+   Spectra <- future_map(spectra,.f = function(x) {tibble(m_z=x[,1],Intensity=x[,2])})
+   Spectra <- bind_rows(bind_rows(setNames(Spectra, seq_along(Spectra)), .id = "id")) %>% rename(Spectrum= id)
+  
+   # object <- tibble(Spectra=spectra) %>% mutate(Spectra=future_map(Spectra,.f = function(x) {tibble(m_z=x[,1],Intensity=x[,2])}))
+   # head(object)
+   # chrom_plot <- object %>% unnest(.id = "Spectrum")
+  
+   chrom_plot <- left_join(x = Spectra,
+                           y = tibble(rt_times2=rt_times/60) %>% rownames_to_column(var = "Spectrum"),
+                           by="Spectrum")
+  
+  
+   # HIER PASSIERT DAS FILTERING1
+   rect_data <- (Peaklist %>% select(lipid,starts_with(match = "C")))
+   rect_data2 <- (Peaklist %>% select(lipid,starts_with(match = "D")))
+   rect_data_p <- rect_data %>% filter(C_mz_low > window[1] & C_mz_high < window[2])
+  
+  
+  
+     plotting1 <- chrom_plot %>% filter(m_z < window[2]+1 & m_z > window[1]-1)
+   # plotting$Intensity
+   cuter <- 100
+   plotting <- plotting1 %>% filter(Intensity > cuter)
+   p2D <- ggplot()+
+     geom_hex(data = plotting, mapping = aes(x = rt_times2,y = m_z,weight=log2(Intensity)),stat = "binhex",binwidth=c(.1,.2))+ # binwidth(x,y)
+     # scale_fill_gradient2(low = "white",mid = "blue",high = "black",midpoint = max(log10(plotting$Intensity))*10,na.value = "white")+
+     # scale_fill_gradient(low = "white",high = "red",na.value = "white")+
+     scale_fill_gradient(low = "white",high = "black",na.value = "white")+
+     geom_rect(data = rect_data_p,mapping = aes(xmin=C_rt_Start,xmax=C_rt_End,ymin=C_mz_low, ymax=C_mz_high),fill="red",alpha=0.8)+
+     geom_point(data = lipidlist,mapping = aes(x=rt_corr,y = mz),size=0.1,alpha=0.9,col="blue")+
+     geom_point(data = rect_data2,mapping = aes(x=D_rt_times,y = D_m_z),size=.1,alpha=0.8,col="green")+
+     geom_text(data = rect_data2,mapping = aes(x=D_rt_times,y = D_m_z+1,label=lipid),size=0.2,alpha=0.8,col="black")+
+     # scale_fill_grey()na.value = "white",low = "yellow",mid = "blue",high = "black",midpoint = 3)+
+     scale_x_continuous(limits = c(0,12),breaks = function(limits) {seq(from=limits[1],to = limits[2],by = 1)},minor_breaks = function(limits) {seq(from=limits[1],to = limits[2],by = 0.2)},expand = c(0,0))+
+    scale_y_continuous(limits = c(500,950),breaks = function(limits) {seq(from=limits[1],to = limits[2],by = 5)},minor_breaks = function(limits) {seq(from=limits[1],to = limits[2],by = 1)},expand = c(0,0))+
+    theme_bw()+
+    theme(legend.position = "none",axis.text = element_text(size = 6))
+  ggsave(filename = here(Folder_created,paste0(filelist2[i],"_2D_",Sys.Date(),".pdf")),plot = p2D,device = "pdf",width = 16.5,height = 11.7)
+
+  close(mz)
+ 
+  # version for Samples:
+  # reintroduce comments:
+    Peaklist2 <- left_join(Peaklist,y = comments,by="lipid")
+    ypsilon <- Peaklist2 %>% arrange(lipid) %>% transmute(lipid1=lipid,lipid,comment,info) %>% group_by(lipid1) %>%  nest()
+
+    ## part to create single plots per peak and save to named pdf per sample:
+    xilon <- (Peaklist %>% arrange(lipid))$Peakshape
+  ###create the single plots - works only for samples with comments,
+  temp <- map2(.x = xilon,.y = ypsilon$data,.f = function(x,y){
+    ggplot(data = x[[1]],mapping = aes(x = rt_times,y = Intensity))+
+      geom_line()+
+      geom_area(data = x[[2]],mapping = aes(x = rt_times,y = Intensity,fill="red",alpha=.6))+
+      labs(title = y[[1]],caption = paste(y[[2]],y[[3]],sep = "; "))+theme_bw()+theme(legend.position = "none")
+  })
+  ggpubr::ggexport(gridExtra::marrangeGrob(grobs = temp,nrow=2,ncol=2),filename = here(Folder_created,paste0(filelist2[i],"_single_plots_",Sys.Date(),".pdf")))
+    # 
+    # # version for dilutions.
+    #       # reintroduce comments:
+    #       Peaklist <- left_join(Peaklist,y = comments,by="lipid")
+    #       ypsilon <- Peaklist %>% arrange(lipid) %>% transmute(lipid1=lipid,lipid,comment,info) %>% group_by(lipid1) %>%  nest()
+    #       
+    #       ## part to create single plots per peak and save to named pdf per sample:
+    #       xilon <- (Peaklist %>% arrange(lipid))$Peakshape
+    #     
+    #     # create the single plots
+    #     temp <- map2(.x = xilon,.y = ypsilon$data,.f = function(x,y){
+    #   
+    #       ggplot(data = x[[1]],mapping = aes(x = rt_times,y = Intensity))+
+    #         geom_line()+
+    #         geom_area(data = x[[2]],mapping = aes(x = rt_times,y = Intensity,fill="red",alpha=.6))+
+    #         labs(title = y[[1]])+theme_bw()+theme(legend.position = "none")
+    #     })
+    #     
+    #     # temp <- Peaklist %>% arrange(lipid) %>% mutate(single_Plots=map2(.x = Peakshape,.y = ypsilon,.f = function(x,y){
+    #     #   ggplot(data = x[[1]],mapping = aes(x = rt_times,y = Intensity))+
+    #     #     geom_line()+
+    #     #     geom_area(data = x[[2]],mapping = aes(x = rt_times,y = Intensity,fill="red",alpha=.6))+
+    #     #     labs(title = y[[1]],caption = str_c(y[[2]],y[[3]]))+theme(legend.position = "none")
+    #     # }))
+    #     ggpubr::ggexport(gridExtra::marrangeGrob(grobs = temp,nrow=2,ncol=2),filename = here(Folder_created,paste0(filelist2[i],"_single_plots_",Sys.Date(),".pdf")))
+      
+        save(Peaklist,file = here(Folder_created,paste0(filelist2[i],"_1_",Sys.Date(),".Rdata")))
+          gc()
+          progress_bar$tick()$print()
+}
+```
